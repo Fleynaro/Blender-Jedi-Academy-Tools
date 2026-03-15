@@ -16,28 +16,54 @@
 #
 # ##### END GPL LICENSE BLOCK #####
 
+import os
+
+from .idtech3lib import ID3Shader
+from .idtech3lib.ID3VFS import Q3VFS
+from .idtech3lib.ImportSettings import Import_Settings, Preset
+
 from .mod_reload import reload_modules
-reload_modules(locals(), __package__, ["JAG2Scene", "JAG2GLA", "JAFilesystem", "JAG2AnimationCFG"], [".bpy_internal_stubs", ".casts", ".JAG2Constants"])  # nopep8
+reload_modules(locals(), __package__, ["JAG2Scene", "JAG2GLA", "JAG2AnimationCFG"], [".bpy_internal_stubs", ".casts", ".JAG2Constants"])  # nopep8
 
 import bpy
-from typing import Tuple, cast
+from typing import cast
 from . import JAG2Scene
 from . import JAG2GLA
-from . import JAFilesystem
 from . import JAG2AnimationCFG
 from .bpy_internal_stubs import OperatorReturnItems
 from .casts import optional_cast
 from .JAG2Constants import SkeletonFixes
 from bpy_extras.io_utils import ImportHelper, ExportHelper
 
+def get_base_paths(context, import_file_path = None):
+    addon_name = __name__.split('.')[0]
+    prefs = context.preferences.addons[addon_name].preferences
 
-def GetPaths(basepath, filepath) -> Tuple[str, str]:
-    if basepath == "":
-        basepath, filepath = JAFilesystem.SplitPrefix(filepath)
-        filepath = JAFilesystem.RemoveExtension(filepath)
-    else:
-        filepath = JAFilesystem.RelPathNoExt(filepath, basepath)
-    return basepath, filepath
+    paths = []
+    # mod paths overwrite files in base, so are higher priority
+    for path in [prefs.mod_path_1, prefs.mod_path_0, prefs.base_path]:
+        if path.strip() == "":
+            continue
+        fixed_base_path = path.replace("\\", "/")
+        if not fixed_base_path.endswith('/'):
+            fixed_base_path = fixed_base_path + '/'
+        paths.append(fixed_base_path)
+    # no path found, so make a guess?
+    if len(paths) == 0 and import_file_path is not None:
+        fixed_file_path = import_file_path.replace("\\", "/")
+        split_folder = "/maps/"
+        if (fixed_file_path.endswith(".md3") or
+            fixed_file_path.endswith(".tik") or
+            fixed_file_path.endswith(".mdr") or
+            fixed_file_path.endswith(".tan")
+            ):
+            split_folder = "/models/"
+        split = fixed_file_path.split(split_folder)
+        if len(split) > 1:
+            paths = [split[0] + '/']
+            print("Guessed base path:" + paths[0])
+
+    return paths
 
 
 class GLMImport(bpy.types.Operator, ImportHelper):  # type: ignore
@@ -53,14 +79,14 @@ class GLMImport(bpy.types.Operator, ImportHelper):  # type: ignore
 
     def skin_list_cb(self, context):
         try:
-            filepath = JAFilesystem.PathToFile(self.filepath, "")
+            filepath = os.path.dirname(self.filepath)
         except:
             print("could not find file or folder")
             return []
         skin_files = []
 
         try:
-            skin_files = sorted(f for f in JAFilesystem.FileList(filepath)
+            skin_files = sorted(f for f in os.listdir(filepath)
                                 if f.endswith(".skin"))
         except Exception as e:
             print("Could not open skin files, error: ", e)
@@ -89,11 +115,6 @@ class GLMImport(bpy.types.Operator, ImportHelper):  # type: ignore
         name="Skin",
         default=1,  # type: ignore
         description="The skin to load, choose none to use file internal paths"
-    )  # pyright: ignore [reportInvalidTypeForm]
-    basepath: bpy.props.StringProperty(
-        name="Base Path",
-        description="The base folder relative to which paths should be interpreted. Leave empty to let the importer guess (needs /GameData/ in filepath).",
-        default=""
     )  # pyright: ignore [reportInvalidTypeForm]
     glaOverride: bpy.props.StringProperty(
         name=".gla override",
@@ -136,19 +157,76 @@ class GLMImport(bpy.types.Operator, ImportHelper):  # type: ignore
         description="If only a range of frames of the animation is to be imported, this is the total number of frames to import",
         default=1,
         min=1)  # pyright: ignore [reportInvalidTypeForm]
+    preset: bpy.props.EnumProperty(
+        name="Import preset",
+        description="You can select wether you want to import a glm for "
+        "rendering or previewing.",
+        default=Preset.RENDERING.value,
+        items=[
+            (Preset.PREVIEW.value, "Preview",
+             "Builds eevee shaders, imports all misc_model_statics "
+             "when available", 0),
+            (Preset.RENDERING.value, "Rendering",
+             "Builds cycles shaders, only imports visable enities", 1),
+        ]) # pyright: ignore [reportInvalidTypeForm]
+    allLODs: bpy.props.BoolProperty(
+        name="All LODs",
+        description="Whether to import all LODs, or just the first one.",
+        default=False
+    ) # pyright: ignore [reportInvalidTypeForm]
+    cacheVFS: bpy.props.BoolProperty(
+        name="Cache VFS",
+        description="Whether to cache the virtual file system in memory.",
+        default=False
+    ) # pyright: ignore [reportInvalidTypeForm]
+
+    cache: dict | None = None
 
     def execute(self, context) -> set[OperatorReturnItems]:
         print("\n== GLM Import ==\n")
-        # initialize paths
-        basepath, filepath = GetPaths(self.basepath, self.filepath)
-        if self.basepath != "" and JAFilesystem.RemoveExtension(self.filepath) == filepath:
-            self.report({'ERROR'}, "Invalid Base Path")
-            return {'FINISHED'}
+
+        import_settings = Import_Settings(
+            base_paths=get_base_paths(context, self.filepath),
+            preset=cast(Preset, self.preset),
+            allLODs=cast(bool, self.allLODs)
+        )
+
+        cacheVFS = cast(bool, self.cacheVFS)
+
+        VFS = None
+        shader_info = None
+        if cacheVFS and GLMImport.cache:
+            VFS = GLMImport.cache["VFS"]
+            shader_info = GLMImport.cache["shader_info"]
+            print("(!) virtual file system and shaders loaded from cache")
+
+        if not VFS:
+            print("Initialize virtual file system")
+            VFS = Q3VFS()
+            for base_path in import_settings.base_paths:
+                VFS.add_base(base_path)
+            VFS.build_index()
+            print("Done: loaded {} files".format(len(VFS.index)))
+
+        if not shader_info:
+            print("Initialize .shader files")
+            shader_info = ID3Shader.get_material_dicts(VFS,
+                                                import_settings)
+            print("Done: loaded {} shaders".format(len(shader_info)))
+        if cacheVFS:
+            GLMImport.cache = {
+                "VFS": VFS,
+                "shader_info": shader_info
+            }
+            print("virtual file system cached")
+        else:
+            GLMImport.cache = None
+
         # de-percentagionise scale
         scale = self.scale / 100
         # load GLM
-        scene = JAG2Scene.Scene(basepath)
-        success, message = scene.loadFromGLM(filepath)
+        scene = JAG2Scene.Scene(VFS, import_settings)
+        success, message = scene.loadFromGLM(self.filepath)
         if not success:
             self.report({'ERROR'}, message)
             return {'FINISHED'}
@@ -165,24 +243,25 @@ class GLMImport(bpy.types.Operator, ImportHelper):  # type: ignore
             self.report({'ERROR'}, message)
             return {'FINISHED'}
         success, message = scene.loadFromGLA(
-            glafile, loadAnimations, cast(int, self.startFrame), cast(int, self.numFrames))
+            glafile, VFS, loadAnimations, cast(int, self.startFrame), cast(int, self.numFrames))
         if not success:
             self.report({'ERROR'}, message)
             return {'FINISHED'}
         # output to blender
-        skin = ""
+        skin_path = ""
         guess_textures = False
         if self.skin == "GUESS_TEXTURES":
-            skin = ""
+            skin_path = ""
             guess_textures = True
         elif self.skin.strip() != "":
-            skin = JAFilesystem.PathToFile(filepath, "") + self.skin
+            skin_path = os.path.dirname(self.filepath) + os.path.sep + self.skin
         success, message = scene.saveToBlender(
             scale,
-            skin,
+            skin_path,
             guess_textures,
             loadAnimations != JAG2GLA.AnimationLoadMode.NONE,
-            SkeletonFixes[self.skeletonFixes])
+            SkeletonFixes[self.skeletonFixes],
+            shader_info)
         if not success:
             self.report({'ERROR'}, message)
         return {'FINISHED'}
@@ -193,8 +272,6 @@ class GLMImport(bpy.types.Operator, ImportHelper):  # type: ignore
         layout.use_property_split = True
         row = layout.row()
         row.prop(self, "skin")
-        row = layout.row()
-        row.prop(self, "basepath")
         row = layout.row()
         row.prop(self, "glaOverride")
         row = layout.row()
@@ -208,6 +285,10 @@ class GLMImport(bpy.types.Operator, ImportHelper):  # type: ignore
             row.prop(self, "startFrame")
             row = layout.row()
             row.prop(self, "numFrames")
+        row = layout.row()
+        row.prop(self, "preset")
+        row = layout.row()
+        row.prop(self, "allLODs")
 
     def invoke(self, context, event):  # type: ignore
         prefs = bpy.context.preferences.addons[__name__.rsplit('.', 1)[0]].preferences

@@ -17,10 +17,9 @@
 # ##### END GPL LICENSE BLOCK #####
 
 from .mod_reload import reload_modules
-reload_modules(locals(), __package__, ["JAFilesystem"], [".casts", ".error_types"])  # nopep8
+reload_modules(locals(), __package__, [], [".casts", ".error_types"])  # nopep8
 
 import bpy
-from . import JAFilesystem
 from .error_types import ErrorMessage
 from typing import List, Tuple
 

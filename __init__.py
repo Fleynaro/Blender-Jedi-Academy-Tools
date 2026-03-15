@@ -19,7 +19,13 @@
 #  Imports
 
 from .mod_reload import reload_modules
-reload_modules(locals(), __package__, ["JAAseExport", "JAAseImport", "JAPatchExport", "JARoffImport", "JARoffExport", "JAG2Panels", "JAG2Operators"], [])  # nopep8
+reload_modules(locals(), __package__, ["BlenderImage", "QuakeShader", "ShaderNodes", "JAAseExport", "JAAseImport", "JAPatchExport", "JARoffImport", "JARoffExport", "JAG2Panels", "JAG2Operators"], [])  # nopep8
+
+if "bpy" in locals():
+    # Just do all the reloading here
+    import importlib
+    from . import idtech3lib
+    importlib.reload(idtech3lib)
 
 #  Blender
 import bpy
@@ -53,8 +59,24 @@ JAAseExportOp = JAAseExport.Operator
 class JAAddonPreferences(bpy.types.AddonPreferences):
     bl_idname = __name__
     base_path: bpy.props.StringProperty(
-        name="default base path",
+        name="Base path",
         description="Path to base folder",
+        default="",
+        subtype="DIR_PATH",
+        maxlen=2048,
+    ) # pyright: ignore [reportInvalidTypeForm]
+
+    mod_path_0: bpy.props.StringProperty(
+        name="Mod path",
+        description="Path to a mod folder",
+        default="",
+        subtype="DIR_PATH",
+        maxlen=2048,
+    ) # pyright: ignore [reportInvalidTypeForm]
+
+    mod_path_1: bpy.props.StringProperty(
+        name="Additional mod path",
+        description="Path to an addtional mod folder",
         default="",
         subtype="DIR_PATH",
         maxlen=2048,
@@ -70,9 +92,13 @@ class JAAddonPreferences(bpy.types.AddonPreferences):
 
     def draw(self, context):
         layout = self.layout
-        layout.use_property_split = True
         row = layout.row()
         row.prop(self, "base_path")
+        row = layout.row()
+        row.prop(self, "mod_path_0")
+        row = layout.row()
+        row.prop(self, "mod_path_1")
+        layout.separator()
         row = layout.row()
         row.prop(self, "scale")
 

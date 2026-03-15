@@ -17,14 +17,15 @@
 # ##### END GPL LICENSE BLOCK #####
 
 
+from .idtech3lib.ID3VFS import Q3VFS
+from .idtech3lib.ImportSettings import Import_Settings
 from .mod_reload import reload_modules
-reload_modules(locals(), __package__, ["JAStringhelper", "JAFilesystem", "JAG2Constants", "JAG2GLA", "JAMaterialmanager", "MrwProfiler", "JAG2Panels"], [".casts", ".error_types"])  # nopep8
+reload_modules(locals(), __package__, ["JAStringhelper", "JAG2Constants", "JAG2GLA", "JAMaterialmanager", "MrwProfiler", "JAG2Panels"], [".casts", ".error_types"])  # nopep8
 
 from dataclasses import dataclass
 from typing import BinaryIO, Dict, List, Optional, Sequence, Tuple, cast
 import struct
 from . import JAStringhelper
-from . import JAFilesystem
 from . import JAG2Constants
 from . import JAG2GLA
 from . import JAMaterialmanager
@@ -358,6 +359,7 @@ class ImportMetadata:
     surfaceDataCollection: MdxmSurfaceDataCollection
     materialManager: JAMaterialmanager.MaterialManager
     boneNames: Dict[int, str]
+    import_settings: Import_Settings
 
 
 class MdxmVertex:
@@ -687,9 +689,8 @@ class MdxmSurface:
         )
 
         material = data.materialManager.getMaterial(name, surfaceData.shader)
-        if material == None:
-            material = bpy.data.materials.new(
-                name=JAStringhelper.decode(surfaceData.shader))
+        if material is None:
+            return None
         mesh.materials.append(material)
 
         # this is probably actually bullshit, since vertex order is what determines a tag, not index order! I think.
@@ -871,7 +872,8 @@ class MdxmLOD:
         for surface in self.surfaces:
             if surface is not None:
                 obj = surface.saveToBlender(data, self.level)
-                objects.append(obj)
+                if obj is not None:
+                    objects.append(obj)
         # 2nd pass: set parent relations
         for i, obj in enumerate(objects):
             parentIndex = data.surfaceDataCollection.surfaces[i].parentIndex
@@ -939,6 +941,7 @@ class MdxmLODCollection:
                 raise Exception("No active Scene")
             scene.collection.objects.link(root)
             LOD.saveToBlender(data, root)
+            if not data.import_settings.allLODs: break
 
     def getSize(self):
         size = 0
@@ -961,8 +964,8 @@ class GLM:
         try:
             file = open(filepath_abs, mode="rb")
         except IOError as e:
-            print(f"Could not open file: {filepath_abs}")
-            return False, ErrorMessage(f"Could not open file: {e}")
+            print(f"Could not open glm file: {filepath_abs}")
+            return False, ErrorMessage(f"Could not open glm file: {e}")
         profiler.start("reading header")
         success, message = self.header.loadFromFile(file)
         if not success:
@@ -990,7 +993,7 @@ class GLM:
             print("Warning: File not completely read or LODs not last structure in file. The former would be a problem, the latter wouldn't.")
         return True, NoError
 
-    def loadFromBlender(self, glm_filepath_rel: str, gla_filepath_rel: str, basepath: str) -> Tuple[bool, ErrorMessage]:
+    def loadFromBlender(self, glm_filepath: str, gla_filepath: str) -> Tuple[bool, ErrorMessage]:
         self.header.name = glm_filepath_rel.replace("\\", "/").encode()
         # the .gla extension must be omitted
         self.header.animName = gla_filepath_rel.removesuffix(".gla").encode()
@@ -1117,7 +1120,7 @@ class GLM:
     # basepath: ../GameData/.../
     # gla: JAG2GLA.GLA object - the Skeleton (for weighting purposes)
     # scene_root: "scene_root" object in Blender
-    def saveToBlender(self, basepath: str, gla: JAG2GLA.GLA, scene_root: bpy.types.Object, skin_rel: str, guessTextures: bool) -> Tuple[bool, ErrorMessage]:
+    def saveToBlender(self, VFS: Q3VFS, gla: JAG2GLA.GLA, scene_root: bpy.types.Object, skin_path: str, guessTextures: bool, import_settings: Import_Settings, shader_info: dict) -> Tuple[bool, ErrorMessage]:
         if gla.header.numBones != self.header.numBones:
             return False, ErrorMessage(f"Bone number mismatch - gla has {gla.header.numBones} bones, model uses {self.header.numBones}. Maybe you're trying to load a jk2 model with the jk3 skeleton or vice-versa?")
         print("creating model...")
@@ -1129,10 +1132,11 @@ class GLM:
             scene_root=scene_root,
             surfaceDataCollection=self.surfaceDataCollection,
             materialManager=JAMaterialmanager.MaterialManager(),
-            boneNames={bone.index: bone.name for bone in gla.skeleton.bones}
+            boneNames={bone.index: bone.name for bone in gla.skeleton.bones},
+            import_settings=import_settings
         )
         success, message = data.materialManager.init(
-            basepath, skin_rel, guessTextures)
+            VFS, import_settings, skin_path, guessTextures, shader_info)
         if not success:
             return False, message
 

@@ -623,8 +623,8 @@ class GLA:
         try:
             file: BinaryIO = open(filepath_abs, mode="rb")
         except IOError:
-            print("Could not open file: {}".format(filepath_abs))
-            return False, ErrorMessage("Could not open file!")
+            print("Could not open gla file: {}".format(filepath_abs))
+            return False, ErrorMessage("Could not open gla file!")
         profiler = MrwProfiler.SimpleProfiler(True)
         # load header
         profiler.start("reading header")

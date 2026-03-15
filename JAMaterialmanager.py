@@ -16,36 +16,38 @@
 #
 # ##### END GPL LICENSE BLOCK #####
 
+from .QuakeShader import create_white_image, quake_shader
+from .idtech3lib.ImportSettings import Import_Settings
+from .idtech3lib.ID3VFS import Q3VFS
 from .mod_reload import reload_modules
-reload_modules(locals(), __package__, ["JAFilesystem", "JAStringhelper"], [".casts", ".error_types"])  # nopep8
+reload_modules(locals(), __package__, ["QuakeShader", "JAStringhelper"], [".casts", ".error_types"])  # nopep8
 
 from typing import Optional, Tuple
-from . import JAFilesystem
 from . import JAStringhelper
 from .casts import downcast, optional_cast
 from .error_types import ErrorMessage, NoError
 
 import bpy
 
-
 class MaterialManager():
     def __init__(self):
-        self.basepath = ""
-        self.materials = {}
+        self.VFS = None
+        self.import_settings = None
         self.guessTextures = False
+        self.shader_info = dict()
         self.useSkin = False
         self.initialized = False
 
-    def init(self, basepath: str, skin_rel: str, guessTextures: bool) -> Tuple[bool, ErrorMessage]:
-        self.basepath = basepath
+    def init(self, VFS: Q3VFS, import_settings: Import_Settings, skin_path: str, guessTextures: bool, shader_info: dict) -> Tuple[bool, ErrorMessage]:
+        self.VFS = VFS
+        self.import_settings = import_settings
         self.guessTextures = guessTextures
-        if skin_rel != "":
-            succes, skin_abs = JAFilesystem.FindFile(
-                skin_rel, self.basepath, ["skin"])
+        self.shader_info = shader_info
+        if skin_path != "":
             try:
-                file = open(skin_abs, mode="r")
+                file = open(skin_path, mode="r")
             except IOError:
-                print("Could not open file: ", skin_rel, sep="")
+                print("Could not open file: ", skin_path, sep="")
                 return False, ErrorMessage("Could not open skin!")
             self.skin = {}
             for line in file:
@@ -57,7 +59,7 @@ class MaterialManager():
         return True, NoError
 
     def getMaterial(self, name, bsShader):
-        assert (self.initialized)
+        assert (self.initialized and self.VFS and self.import_settings)
         # "fix" removed textures (which should force using .skin file)
         if self.guessTextures:
             # I don't need to fix nomaterial - empty materials don't get loaded anyway.
@@ -69,42 +71,35 @@ class MaterialManager():
         if self.useSkin:
             if name in self.skin:
                 shader = self.skin[name]
-        if shader.lower() == "[nomaterial]" or shader == "" or shader == "*off":
-            return
-        if shader.lower() in self.materials:
-            return self.materials[shader.lower()]
-        # create material, it doesn't exist yet
-        mat = bpy.data.materials.new(shader)
-        self.materials[shader.lower()] = mat
-        # try to find the image
-        success, path = JAFilesystem.FindFile(
-            shader, self.basepath, ["jpg", "png", "tga"])
-        # if it doesn't exist, we're done.
-        if not success:
-            print("Texture not found: \"", shader, "\"", sep="")
-            # make it pink though
-            mat.diffuse_color = (1, 0, 1, 1)
-            return mat
+        shader = shader.lower()
+        if shader == "[nomaterial]" or shader == "" or shader == "*off":
+            return None
+        shader = shader.split(".")[0] # remove extension
+        
+        mat = bpy.data.materials.get(shader)
+        if mat is None:
+            mat = bpy.data.materials.new(shader)
 
-        mat.use_nodes = True
-        node_tree = optional_cast(bpy.types.ShaderNodeTree, mat.node_tree)
-        # we cannot query the "Principled BSDF" node by name because that only works in English Blender
-        bsdf: Optional[bpy.types.Node] = None
-        for node in node_tree.nodes.values():
-            node = optional_cast(bpy.types.Node, node)
-            # so we search by type instead
-            if node.type == 'BSDF_PRINCIPLED':
-                bsdf = node
-                break
-        if bsdf == None:
-            print("Bug: could not find the Principled BSDF node in new material, please report this")
-            # fall back to pink
-            mat.use_nodes = False
-            mat.diffuse_color = (1, 0, 1, 1)
-            return mat
-        img = downcast(bpy.types.ShaderNodeTexImage, node_tree.nodes.new('ShaderNodeTexImage'))
-        img.image = bpy.data.images.load(path)
-        node_tree.links.new(
-            bsdf.inputs['Base Color'], img.outputs['Color'])
+        # make sure the $whiteimage is loaded
+        create_white_image()
 
+        qs = quake_shader(shader, mat)
+        #print("*** shader: ", shader)
+        qs.set_grid_lit()
+        if shader in self.shader_info:
+            attributes, stages = self.shader_info[shader]
+            #print("------ attributes: ", attributes)
+            #print("------ stages: ", stages)
+            if ("surfaceparm" in attributes and
+            "nodraw" in attributes["surfaceparm"]):
+                qs.is_system_shader = True
+            qs.attributes = attributes
+            if qs.mat is not None:
+                if "first_line" in attributes:
+                    qs.mat["first_line"] = attributes["first_line"]
+                if "shader_file" in attributes:
+                    qs.mat["shader_file"] = attributes["shader_file"]
+            for stage in stages:
+                qs.add_stage(stage)
+        qs.finish_shader(self.VFS, self.import_settings)
         return mat
